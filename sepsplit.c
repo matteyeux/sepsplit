@@ -12,7 +12,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <stdint.h>
-#include "mach-o/loader.h"
+#include <mach-o/loader.h>
 
 #define IS64(image) (*(uint8_t *)(image) & 1)
 
