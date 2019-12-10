@@ -18,6 +18,50 @@
 
 #define MACHO(p) ((*(unsigned int *)(p) & ~1) == 0xfeedface)
 
+/* at offset 0x10f8 (pointer to it stored right after "legion2") */
+struct sep_data_hdr_64_t {
+    uint8_t kernel_uuid[16];
+    uint64_t unknown0;
+    uint64_t kernel_base_paddr;
+    uint64_t kernel_max_paddr;
+    uint64_t app_images_base_paddr;
+    uint64_t app_images_max_paddr;
+    uint64_t paddr_max; /* size of SEP firmware image */
+    uint64_t unknown1;
+    uint64_t unknown2;
+    uint64_t unknown3;
+    uint64_t init_base_paddr;
+    uint64_t unknown4;
+    uint64_t unknown5;
+    uint64_t unknown6;
+    uint64_t unknown7;
+    uint64_t unknown8;
+    uint64_t unknown9;
+    char init_name[16];
+    uint8_t init_uuid[16];
+    uint64_t unknown10;
+    uint64_t unknown11;
+    uint64_t n_apps;
+};
+
+/* right after the above, from offset 0x11c0 */
+struct sepapp_64_t {
+    uint64_t phys;
+    uint64_t size_text;
+    uint64_t unknown0;
+    uint64_t size_data;
+    uint64_t virt;
+    uint64_t entry;
+    uint64_t unknown4;
+    uint64_t unknown5;
+    uint64_t unknown6;
+    uint32_t minus_one;
+    uint32_t unknown7;
+    char app_name[16];
+    uint8_t app_uuid[16];
+    uint64_t unknown8;
+};
+
 static const struct sepapp_t {
     uint64_t phys;
     uint32_t virt;
@@ -262,7 +306,7 @@ restore_file(unsigned index, const unsigned char *buf, size_t size, int restore)
             continue;
         }
         *p = '\0';
-        printf("%-12s phys 0x%lx, virt 0x%x, size 0x%x, entry 0x%x\n", tail, apps->phys, apps->virt, apps->size, apps->entry);
+        printf("%-12s phys 0x%llx, virt 0x%x, size 0x%x, entry 0x%x\n", tail, apps->phys, apps->virt, apps->size, apps->entry);
         apps = (struct sepapp_t *)((char *)apps + sizeof_sepapp);
     } else {
         if (index == 0) {
@@ -309,11 +353,82 @@ split(int restore)
     return 0;
 }
 
+static int
+restore_file_simple (unsigned index, const char * tail, const unsigned char *buf, size_t size)
+{
+    int rv;
+    void *tmp;
+    char name[256];
+
+    snprintf(name, sizeof(name), "sepdump%02u_%s", index, tail);
+    tmp = malloc(size);
+    if (!tmp) {
+        return -1;
+    }
+    memcpy(tmp, buf, size);
+    restore_linkedit(tmp, size);
+    rv = write_file(name, tmp, size);
+    free(tmp);
+    return rv;
+}
+
+static void
+tail_from_name (char * tail, const char * app_name)
+{
+    char * p;
+
+    memcpy(tail, app_name, 12);
+    for (p = tail + 12; p > tail && p[-1] == ' '; p--) {
+        continue;
+    }
+    *p = '\0';
+}
+
+static uint64_t
+get_hdr_offset()
+{
+    unsigned char *legion2 = boyermoore_horspool_memmem (kernel, 4096 * 2, (unsigned char *)"Built by legion2", 16);
+    return *(uint64_t *) (legion2 + 16);
+}
+
+static int
+split_64(uint64_t hdr_offset)
+{
+    struct sep_data_hdr_64_t * hdr;
+    char tail[12 + 1];
+    int i;
+    size_t sz;
+    struct sepapp_64_t * apps;
+
+    hdr = (struct sep_data_hdr_64_t *) (kernel + hdr_offset);
+    write_file("sepdump00_boot", kernel, hdr->kernel_base_paddr);
+
+    sz = calc_size(kernel + hdr->kernel_base_paddr, kernel_size - hdr->kernel_base_paddr);
+    restore_file_simple(1, "kernel", kernel + hdr->kernel_base_paddr, sz);
+
+    sz = calc_size(kernel + hdr->init_base_paddr, kernel_size - hdr->init_base_paddr);
+    tail_from_name(tail, hdr->init_name);
+    restore_file_simple(2, tail, kernel + hdr->init_base_paddr, sz);
+
+    apps = (struct sepapp_64_t *) (((uint8_t *) hdr) + sizeof(struct sep_data_hdr_64_t));
+
+    for (i = 0; i < hdr->n_apps; i++) {
+        sz = calc_size(kernel + apps[i].phys, kernel_size - apps[i].phys);
+        tail_from_name(tail, apps[i].app_name);
+        restore_file_simple(i + 3, tail, kernel + apps[i].phys, sz);
+        printf("%-12s phys 0x%llx, virt 0x%llx, size_text 0x%llx, size_data 0x%llx, entry 0x%llx\n",
+                tail, apps[i].phys, apps[i].virt, apps[i].size_text, apps[i].size_data, apps[i].entry);
+    }
+
+    return 0;
+}
+
 int
 main(int argc, char **argv)
 {
     int rv;
     const char *krnl = (argc > 1) ? argv[1] : "sep";
+    uint64_t hdr_offset;
 
     rv = init_kernel(krnl);
     if (rv) {
@@ -321,7 +436,12 @@ main(int argc, char **argv)
         return -1;
     }
 
-    rv = split(1);
+    hdr_offset = get_hdr_offset();
+    if (hdr_offset == 0) {
+        rv = split(1);
+    } else {
+        rv = split_64(hdr_offset);
+    }
 
     term_kernel();
     return 0;
