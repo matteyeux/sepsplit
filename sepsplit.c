@@ -17,6 +17,7 @@
 #define IS64(image) (*(uint8_t *)(image) & 1)
 
 #define MACHO(p) ((*(unsigned int *)(p) & ~1) == 0xfeedface)
+#define MIN(x,y) ((x) < (y) ? (x) : (y))
 
 /* at offset 0x10f8 (pointer to it stored right after "legion2") */
 struct sep_data_hdr_64_t {
@@ -46,9 +47,9 @@ struct sep_data_hdr_64_t {
 
 /* right after the above, from offset 0x11c0 */
 struct sepapp_64_t {
-    uint64_t phys;
+    uint64_t phys_text;
     uint64_t size_text;
-    uint64_t unknown0;
+    uint64_t phys_data;
     uint64_t size_data;
     uint64_t virt;
     uint64_t entry;
@@ -127,6 +128,33 @@ boyermoore_horspool_memmem(const unsigned char* haystack, size_t hlen,
     }
 
     return NULL;
+}
+
+static void
+overwrite_data_segment(unsigned char *p, const unsigned char *data_buf, size_t data_size)
+{
+    unsigned i;
+    const struct mach_header *hdr = (struct mach_header *)p;
+    const uint8_t *q = p + sizeof(struct mach_header);
+
+    if (!MACHO(p)) {
+        return;
+    }
+    if (IS64(p)) {
+        q += 4;
+    }
+
+    for (i = 0; i < hdr->ncmds; i++) {
+        const struct load_command *cmd = (struct load_command *)q;
+        if (cmd->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (struct segment_command_64 *)q;
+            if (strcmp(seg->segname, "__DATA") == 0) {
+                memcpy(p + seg->fileoff, data_buf, MIN(data_size, seg->filesize));
+                break;
+            }
+        }
+        q = q + cmd->cmdsize;
+    }
 }
 
 static size_t
@@ -354,7 +382,7 @@ split(int restore)
 }
 
 static int
-restore_file_simple (unsigned index, const char * tail, const unsigned char *buf, size_t size)
+restore_file_simple (unsigned index, const char * tail, const unsigned char *buf, size_t size, const unsigned char *data_buf, size_t data_size)
 {
     int rv;
     void *tmp;
@@ -367,6 +395,9 @@ restore_file_simple (unsigned index, const char * tail, const unsigned char *buf
     }
     memcpy(tmp, buf, size);
     restore_linkedit(tmp, size);
+    if (data_buf) {
+        overwrite_data_segment(tmp, data_buf, data_size);
+    }
     rv = write_file(name, tmp, size);
     free(tmp);
     return rv;
@@ -404,20 +435,20 @@ split_64(uint64_t hdr_offset)
     write_file("sepdump00_boot", kernel, hdr->kernel_base_paddr);
 
     sz = calc_size(kernel + hdr->kernel_base_paddr, kernel_size - hdr->kernel_base_paddr);
-    restore_file_simple(1, "kernel", kernel + hdr->kernel_base_paddr, sz);
+    restore_file_simple(1, "kernel", kernel + hdr->kernel_base_paddr, sz, NULL, 0);
 
     sz = calc_size(kernel + hdr->init_base_paddr, kernel_size - hdr->init_base_paddr);
     tail_from_name(tail, hdr->init_name);
-    restore_file_simple(2, tail, kernel + hdr->init_base_paddr, sz);
+    restore_file_simple(2, tail, kernel + hdr->init_base_paddr, sz, NULL, 0);
 
     apps = (struct sepapp_64_t *) (((uint8_t *) hdr) + sizeof(struct sep_data_hdr_64_t));
 
     for (i = 0; i < hdr->n_apps; i++) {
-        sz = calc_size(kernel + apps[i].phys, kernel_size - apps[i].phys);
+        sz = calc_size(kernel + apps[i].phys_text, kernel_size - apps[i].phys_text);
         tail_from_name(tail, apps[i].app_name);
-        restore_file_simple(i + 3, tail, kernel + apps[i].phys, sz);
-        printf("%-12s phys 0x%llx, virt 0x%llx, size_text 0x%llx, size_data 0x%llx, entry 0x%llx\n",
-                tail, apps[i].phys, apps[i].virt, apps[i].size_text, apps[i].size_data, apps[i].entry);
+        restore_file_simple(i + 3, tail, kernel + apps[i].phys_text, sz, kernel + apps[i].phys_data, apps[i].size_data);
+        printf("%-12s phys_text 0x%llx, virt 0x%llx, size_text 0x%llx, phys_data 0x%llx, size_data 0x%llx, entry 0x%llx\n",
+                tail, apps[i].phys_text, apps[i].virt, apps[i].size_text, apps[i].phys_data, apps[i].size_data, apps[i].entry);
     }
 
     return 0;
