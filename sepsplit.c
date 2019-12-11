@@ -395,7 +395,9 @@ restore_file_simple (unsigned index, const char * tail, const unsigned char *buf
     }
     memcpy(tmp, buf, size);
     restore_linkedit(tmp, size);
-    overwrite_data_segment(tmp, data_buf, data_size);
+    if (data_buf) {
+        overwrite_data_segment(tmp, data_buf, data_size);
+    }
     rv = write_file(name, tmp, size);
     free(tmp);
     return rv;
